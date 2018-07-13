@@ -1,8 +1,9 @@
 import  socket,select
 import sys
-from _thread import  *
-
+import _thread
 import struct
+import dns
+import dns.resolver
 
 listening_port_udp = 6000
 proxy_address = '127.0.0.1'
@@ -10,7 +11,8 @@ max_connection = 2
 buffer_size = 4096
 client_ip = '127.0.0.1'
 client_port = 2000
-
+cacheDNS = []# in this cache first element is request data and seconf is its answer
+cacheHTTP = []# in this cache first element is server name and second is its answer
 
 def send_back(data):
     print("send data back to client")
@@ -29,14 +31,14 @@ def send_back(data):
         window = 5
         if len(data)<=segment_data_size :
             checksum = checksum_func(data)
-            msg = "#" + str(segment_number) + "#" + str(MF) +"#"+ str(checksum)+"#"+ str(data)
+            msg = "#%" + str(segment_number) + "#%" + str(MF) +"#%"+ str(checksum)+"#%"+ str(data)
             message = bytes(msg,'utf-8')
             flag = 1
             while flag:
                 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s1:
                     s1.sendto(message, (client_ip, client_port))
                     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-                        s.settimeout(1.0)
+                        s.settimeout(4.0)
                         s.bind(('127.0.0.1', 6100))
                         try:
                             s.recv(1024)
@@ -53,8 +55,6 @@ def send_back(data):
             print("packet num" ,packetnumber)
             while base < packetnumber :
                 while (next_seqnum < base + window ) and  (j < packetnumber):
-
-                    print("j :", j)
                     segment_number = j
                     print("packet number",segment_number)
 
@@ -69,9 +69,7 @@ def send_back(data):
                         # global end
                         end = len(data)
                     checksum = checksum_func(bytes(data[start:end],"utf-8"))
-                    print("checksum",bytes(data[start:end],"utf-8"))
-                    print("checksum", checksum)
-                    msg = "#" + str(segment_number) + "#" + str(MF) + "#"+str(checksum)+"#" + str(data[start:end])
+                    msg = "#%" + str(segment_number) + "#%" + str(MF) + "#%"+str(checksum)+"#%" + str(data[start:end])
                     message = bytes(msg, 'utf-8')
 
                     s.sendto(message, (client_ip,client_port ))
@@ -103,10 +101,9 @@ def send_back(data):
                             if end > len(data):
                                 # global end
                                 end = len(data)
+
                             checksum = checksum_func(bytes(data[start:end], "utf-8"))
-                            print("checksum",bytes(data[start:end],"utf-8"))
-                            print("checksum", checksum)
-                            msg = "#" + str(segment_number) + "#" + str(MF) + "#" + str(checksum) + "#" + str(data[start:end])
+                            msg = "#%" + str(segment_number) + "#%" + str(MF) + "#%" + str(checksum) + "#%" + str(data[start:end])
                             message = bytes(msg, 'utf-8')
 
                             s.sendto(message, (client_ip, client_port))
@@ -115,13 +112,11 @@ def send_back(data):
                         s1.bind(('127.0.0.1', 6100))
                         s1.settimeout(7.0)
                         try:
-                            print("ahhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh")
                             ack = s1.recvfrom(1024)
-                            print(str(ack),"ackkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk")
                             number = str(ack).split(' ')[1]
                             base = int(number[:-2]) + 1
                             if base != next_seqnum :
-                                s.settimeout(1.0)
+                                s.settimeout(5.0)
                             flag = 0
                         except socket.timeout:
                             print('REQUEST TIMED OUT')
@@ -182,30 +177,41 @@ def send_back(data):
 
 def receive_from_server(connection, data):
 
+    all_new_data = []
     server_port = 80
     s = str(data).split(':')
+    server_name = s[1][:-1]
     # host_line = str(data).split('\n')[2]
     # server_name = host_line.split(':')[1]
-
-    server_name = s[1][:-1]
-#now we must send request to server
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.connect((server_name, server_port))
-    #in this project all is this
-    s.send(bytes('GET / HTTP/1.0\r\n\r\n', 'utf-8'))
-    all_new_data = []
-    while 1:
-        new_data = s.recv(buffer_size)
-        if len(new_data) > 0:
-            # print(new_data)
-            all_new_data.append(str(new_data))
-            # print(str(new_data))
+    flag = 1
+    for c in cacheHTTP:
+        if c[0]==server_name :
+            print("cache hit")
+            all_new_data.append(c[1])
+            flag = 0
+    if(flag):
+        print("cache failed")
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.connect((server_name, server_port))
+        s.send(bytes('GET / HTTP/1.0\r\n\r\n', 'utf-8'))
+        while 1:
+            new_data = s.recv(buffer_size)
+            if len(new_data) > 0:
+                # print(new_data)
+                all_new_data.append(str(new_data))
+                # print(str(new_data))
+            else:
+                break
+        if len(cacheHTTP) > 5:
+            cacheHTTP.pop(0)
+            print("http cache is full")
         else:
-            break
+            cacheHTTP.append((server_name,''.join(all_new_data)))
 
     send_back(''.join(all_new_data))
 
 def checksum_func(data):
+    print("checksum           ",   str(data))
     checksum = 0
     data_len = len(data)
     if (data_len % 2) == 1:
@@ -220,8 +226,56 @@ def checksum_func(data):
     checksum = ~checksum & 0xFFFF
     return checksum
 
+
+def DNS_Function(data):
+    datasplit = data.split(b'#%')
+    type = datasplit[0]
+    server = datasplit[1]
+    target = datasplit[2]
+    msg = ''
+    flag = 1
+
+    for d in cacheDNS:
+        if d[0] == data :
+            print('query found in cache')
+            msg = str(d[1])
+            flag = 0
+    while flag:
+        try:
+            # query = dns.message.make_query(str(target)[2:-1], str(type)[2:-1])
+            # answer = dns.query.tcp(query ,str(server)[2:-1],timeout = 1.0 )
+            answer = dns.resolver.query(str(target)[2:-1],str(type)[2:-1])
+            for i in answer:
+                if str(type)[2:-1] == 'A':
+                    print(i.address)
+                    msg += i.address + '\n'
+                if str(type)[2:-1] == 'CNAME':
+                    print(i.target)
+                    msg += str(i.target) + '\n'
+
+            qm = dns.message.make_query(str(target)[2:-1],str(type)[2:-1])
+            qa = dns.query.udp(qm, str(server)[2:-1], timeout=4)
+            if qa.flags & dns.flags.AA :
+                msg +=" authoritative answer"
+            else :
+                msg += "not authoritative answer"
+
+            if len(cacheDNS) == 5:
+                cacheDNS.pop(0)
+            cacheDNS.append((data, msg))
+            flag = 0
+        except dns.exception.Timeout:
+            print("error")
+
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.connect(('127.0.0.1', 3000))
+    s.send(bytes(msg , 'utf-8'))
 #---------------------------------------------------------------------------------------------------------------------
 #this is for receiving data from client in udp
+
+
+
 try:
     server  = socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
     server.bind(('127.0.0.1' ,listening_port_udp))
@@ -235,11 +289,8 @@ except Exception as e :
 
 
 while 1:
+    print("in udp")
     try :
-        # connection ,address = server.accept()
-        # print(address)
-        #???????????????????????????????????????????????i thick address is its port
-
         data , addr = server.recvfrom(buffer_size)
         d = data[0:8]
         r = data[8:]
@@ -251,17 +302,37 @@ while 1:
         else:
             print('Checksum Error!Packet is discarded')
 
-        # client_ip = addr[0]
-        # client_ip = addr[1]
+
         #bayad betonim ip and port client ro berizim to client_ip and client_port global
         print("proxy   ",data)
         if data is 0 :
             break
         else:
-            start_new_thread(receive_from_server, (server, data))
-
+            _thread.start_new_thread(receive_from_server, (server, data))
     except KeyboardInterrupt as e:
         server.close()
         sys.exit(1)
 
 server.close()
+
+# TCP_IP = '127.0.0.1'
+# TCP_PORT = 5005
+# BUFFER_SIZE = 1024  # Normally 1024, but we want fast response
+#
+# s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+# s.bind((TCP_IP, TCP_PORT))
+# s.listen(1)
+#
+# # conn, addr = s.accept()
+# # print('Connection address:', addr)
+# while 1:
+#     conn, addr = s.accept()
+#     data = conn.recv(BUFFER_SIZE)
+#     # if not data: break
+#     print(addr)
+#     if data:
+#         print("received data:", data)
+#         DNS_Function(data)
+    # conn.send(data)  # echo
+# conn.close()
+
